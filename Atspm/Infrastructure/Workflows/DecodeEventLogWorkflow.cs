@@ -38,41 +38,90 @@ namespace Utah.Udot.ATSPM.Infrastructure.Workflows
         ///<inheritdoc cref="DecodeDeviceData"/>
         public DecodeDeviceData DecodeDeviceData { get; private set; }
 
-        ///<inheritdoc cref="BatchBlock{T}"/>
-        public BatchBlock<Tuple<Device, EventLogModelBase>> BatchEventLogs { get; private set; }
+        /// <summary>
+        /// Broadcasts decoded events to the archive and signal-timing branches.
+        /// </summary>
+        public BroadcastBlock<Tuple<Device, EventLogModelBase>> BroadcastEvents { get; private set; }
 
-        ///<inheritdoc cref="ArchiveDataEvents"/>
-        public ArchiveDataEvents ArchiveDeviceData { get; private set; }
+        /// <summary>
+        /// Filters decoded events to the Indiana events used by signal-timing processing.
+        /// </summary>
+        public TransformManyBlock<Tuple<Device, EventLogModelBase>, IndianaEvent> TransformToIndianaEvent { get; private set; }
 
-        ///<inheritdoc cref="SaveArchivedEventLogs"/>
-        public SaveArchivedEventLogs SaveEventsToRepo { get; private set; }
+        /// <inheritdoc/>
+        public ArchiveEventLogsWorkflow ArchiveEventLogsWorkflow { get; private set; }
+
+        /// <inheritdoc/>
+        public SignalTimingPlansWorkflow SignalTimingPlansWorkflow { get; private set; }
+
+        /// <inheritdoc/>
+        public override async Task Initialize()
+        {
+            Input = new(null, blockOptions);
+            Output = new(blockOptions);
+
+            InstantiateSteps();
+
+            await ArchiveEventLogsWorkflow.Initialize();
+            await SignalTimingPlansWorkflow.Initialize();
+
+            Steps.Add(Input);
+            AddStepsToTracker();
+            LinkSteps();
+
+            _ = TrackWorkflowCompletionAsync();
+        }
 
         /// <inheritdoc/>
         protected override void AddStepsToTracker()
         {
             Steps.Add(DecodeDeviceData);
-            Steps.Add(BatchEventLogs);
-            Steps.Add(ArchiveDeviceData);
-            Steps.Add(SaveEventsToRepo);
+            Steps.Add(BroadcastEvents);
+            Steps.Add(TransformToIndianaEvent);
+            Steps.Add(ArchiveEventLogsWorkflow.Output);
+            Steps.Add(SignalTimingPlansWorkflow.Output);
         }
 
         /// <inheritdoc/>
         protected override void InstantiateSteps()
         {
-            DecodeDeviceData = new(_services, new ExecutionDataflowBlockOptions() { CancellationToken = _cancellationToken });
-            BatchEventLogs = new(_batchSize);
-            ArchiveDeviceData = new(new ExecutionDataflowBlockOptions() { CancellationToken = _cancellationToken });
-            SaveEventsToRepo = new(_services, new ExecutionDataflowBlockOptions() { CancellationToken = _cancellationToken });
+            DecodeDeviceData = new(_services, new ExecutionDataflowBlockOptions() { MaxDegreeOfParallelism = 1, CancellationToken = _cancellationToken });
+            BroadcastEvents = new(null, new DataflowBlockOptions() { CancellationToken = _cancellationToken });
+            TransformToIndianaEvent = new(t => new[] { t.Item2 }.OfType<IndianaEvent>(), new ExecutionDataflowBlockOptions() { CancellationToken = _cancellationToken });
+            ArchiveEventLogsWorkflow = new(_services, _batchSize, 1, _cancellationToken);
+            SignalTimingPlansWorkflow = new(_services, _batchSize, 1, _cancellationToken);
         }
 
         /// <inheritdoc/>
         protected override void LinkSteps()
         {
             Input.LinkTo(DecodeDeviceData, new DataflowLinkOptions() { PropagateCompletion = true });
-            DecodeDeviceData.LinkTo(BatchEventLogs, new DataflowLinkOptions() { PropagateCompletion = true });
-            BatchEventLogs.LinkTo(ArchiveDeviceData, new DataflowLinkOptions() { PropagateCompletion = true });
-            ArchiveDeviceData.LinkTo(SaveEventsToRepo, new DataflowLinkOptions() { PropagateCompletion = true });
-            SaveEventsToRepo.LinkTo(Output, new DataflowLinkOptions() { PropagateCompletion = true });
+            DecodeDeviceData.LinkTo(BroadcastEvents, new DataflowLinkOptions() { PropagateCompletion = true });
+
+            BroadcastEvents.LinkTo(ArchiveEventLogsWorkflow.Input, new DataflowLinkOptions() { PropagateCompletion = true });
+            BroadcastEvents.LinkTo(TransformToIndianaEvent, new DataflowLinkOptions() { PropagateCompletion = true });
+            TransformToIndianaEvent.LinkTo(SignalTimingPlansWorkflow.Input, new DataflowLinkOptions() { PropagateCompletion = true });
+
+            ArchiveEventLogsWorkflow.Output.LinkTo(Output);
+            SignalTimingPlansWorkflow.Output.LinkTo(DataflowBlock.NullTarget<SignalTimingPlan>());
+        }
+
+        private async Task TrackWorkflowCompletionAsync()
+        {
+            try
+            {
+                await Task.WhenAll(
+                    ArchiveEventLogsWorkflow.Output.Completion,
+                    SignalTimingPlansWorkflow.Output.Completion
+                );
+
+                _cancellationToken.ThrowIfCancellationRequested();
+                Output.Complete();
+            }
+            catch (Exception ex)
+            {
+                ((IDataflowBlock)Output).Fault(ex);
+            }
         }
     }
 }

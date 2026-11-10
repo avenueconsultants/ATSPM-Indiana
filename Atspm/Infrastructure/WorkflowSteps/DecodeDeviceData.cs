@@ -16,6 +16,7 @@
 #endregion
 
 using Microsoft.Extensions.DependencyInjection;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Dataflow;
 using Utah.Udot.Atspm.Data.Models.EventLogModels;
 using Utah.Udot.NetStandardToolkit.Workflows;
@@ -40,13 +41,14 @@ namespace Utah.Udot.ATSPM.Infrastructure.WorkflowSteps
         }
 
         /// <inheritdoc/>
-        protected override IAsyncEnumerable<Tuple<Device, EventLogModelBase>> Process(Tuple<Device, FileInfo> input, CancellationToken cancelToken = default)
+        protected override async IAsyncEnumerable<Tuple<Device, EventLogModelBase>> Process(Tuple<Device, FileInfo> input, [EnumeratorCancellation] CancellationToken cancelToken = default)
         {
-            using (var scope = _services.CreateAsyncScope())
-            {
-                var importer = scope.ServiceProvider.GetService<IEventLogImporter>();
+            await using var scope = _services.CreateAsyncScope();
+            var importer = scope.ServiceProvider.GetRequiredService<IEventLogImporter>();
 
-                return importer.Execute(input, cancelToken);
+            await foreach (var item in importer.Execute(input, cancelToken))
+            {
+                yield return item;
             }
         }
     }

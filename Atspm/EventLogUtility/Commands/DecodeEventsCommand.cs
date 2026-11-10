@@ -18,13 +18,13 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using System.CommandLine;
-using System.CommandLine.Hosting;
+using System.CommandLine.Binding;
 using System.CommandLine.NamingConventionBinder;
 using Utah.Udot.Atspm.Infrastructure.Services.HostedServices;
 
 namespace Utah.Udot.Atspm.EventLogUtility.Commands
 {
-    public class DecodeEventsCommand : Command, ICommandOption<DecodeEventsConfiguration>
+    public class DecodeEventsCommand : Command, ICommandOption
     {
         public DecodeEventsCommand() : base("decode-events", "Import and decode event logs from files")
         {
@@ -33,19 +33,24 @@ namespace Utah.Udot.Atspm.EventLogUtility.Commands
 
         public PathCommandOption PathCommandOption { get; set; } = new();
 
-        public ModelBinder<DecodeEventsConfiguration> GetOptionsBinder()
-        {
-            var binder = new ModelBinder<DecodeEventsConfiguration>();
-
-            binder.BindMemberFromValue(b => b.Path, PathCommandOption);
-
-            return binder;
-        }
-
         public void BindCommandOptions(HostBuilderContext host, IServiceCollection services)
         {
-            services.AddSingleton(GetOptionsBinder());
-            services.AddOptions<DecodeEventsConfiguration>().BindCommandLine();
+            services.Configure<DecodeEventsConfiguration>(host.Configuration.GetSection(nameof(DecodeEventsConfiguration)));
+
+            var decodeEventsConfiguration = new ModelBinder<DecodeEventsConfiguration>();
+
+            decodeEventsConfiguration.BindMemberFromValue(b => b.Path, PathCommandOption);
+
+            services.AddOptions<DecodeEventsConfiguration>()
+                .Configure<BindingContext>((a, b) =>
+                {
+                    // The implicit CLI default must not replace the configured path.
+                    if (b.ParseResult.FindResultFor(PathCommandOption)?.IsImplicit == false)
+                        decodeEventsConfiguration.UpdateInstance(a, b);
+                })
+                .ValidateDataAnnotations()
+                .ValidateOnStart();
+
             services.AddHostedService<DecodeEventLogHostedService>();
         }
     }
